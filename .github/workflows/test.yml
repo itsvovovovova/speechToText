@@ -1,0 +1,88 @@
+name: Go integration tests
+on:
+  push:
+  pull_request:
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: speech
+        ports: ["5432:5432"]
+        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=3s --health-retries=10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd="redis-cli ping" --health-interval=5s --health-timeout=3s --health-retries=10
+      rabbitmq:
+        image: rabbitmq:3.12-management
+        ports: ["5672:5672"]
+        options: --health-cmd="rabbitmq-diagnostics -q check_running" --health-interval=5s --health-timeout=5s --health-retries=12
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: '5432'
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: speech
+      DB_MIGRATION_PATH: file://${{ github.workspace }}/src/db/migration
+      REDIS_HOST: 127.0.0.1:6379
+      RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672/
+      STT_INTEGRATION: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - name: Recover tasks accepted while RabbitMQ is stopped
+        env:
+          BROKER_CONTAINER: ${{ job.services.rabbitmq.id }}
+        run: |
+          set -euo pipefail
+          docker stop "$BROKER_CONTAINER"
+          trap 'docker start "$BROKER_CONTAINER" >/dev/null' EXIT
+          go test -count=1 -v -run '^TestDelivery$' ./tests/go > delivery.log 2>&1 &
+          test_pid=$!
+          for attempt in {1..40}; do
+            if grep -q 'publisher stopped' delivery.log; then break; fi
+            if ! kill -0 "$test_pid" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          docker start "$BROKER_CONTAINER"
+          trap - EXIT
+          result=0
+          wait "$test_pid" || result=$?
+          cat delivery.log
+          grep -q 'publisher stopped' delivery.log
+          exit "$result"
+
+  observability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify alert firing and recovery
+        run: docker run --rm --entrypoint /bin/promtool -v "$PWD/ops:/rules:ro" -w /rules prom/prometheus:latest test rules alerts.test.yml
+      - name: Build runtime image
+        run: docker build -t speech-to-text:ci .
+      - name: Verify the runtime user
+        run: test "$(docker run --rm --entrypoint id speech-to-text:ci -u)" = 10001
+      - name: Start an isolated stack for HTTP and restore checks
+        run: |
+          cp .env.example .env
+          docker compose up -d --wait postgres redis rabbitmq server
+      - name: Check the public HTTP contract
+        run: ./ops/http-smoke.sh
+      - name: Restore a PostgreSQL archive into a fresh database
+        run: ./ops/restore-drill.sh
+      - name: Collect Compose logs
+        if: failure()
+        run: docker compose logs
+      - name: Clean up the CI stack
+        if: always()
+        run: docker compose down -v

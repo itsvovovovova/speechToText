@@ -27,7 +27,9 @@ type GetInfoResponse struct {
 }
 
 type GetResultResponse struct {
-	Result string `json:"result"`
+	Result *string `json:"result"`
+	Status string  `json:"status"`
+	Error  string  `json:"error,omitempty"`
 }
 
 type GetStatusResponse struct {

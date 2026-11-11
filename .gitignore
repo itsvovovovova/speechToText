@@ -22,3 +22,6 @@
 .DS_Store
 Thumbs.db
 claude.txt
+.cph/
+__pycache__/
+*.pyc

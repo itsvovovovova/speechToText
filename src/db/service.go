@@ -1,10 +1,10 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
-	"speechToText/src/service"
 	"speechToText/src/types"
 	"time"
 
@@ -41,44 +41,6 @@ func (s *Store) CheckAuthData(username string, password string) (bool, error) {
 	return bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password)) == nil, nil
 }
 
-func (s *Store) AddAudioTask(taskID string, username string, audio string) error {
-	_, err := s.db.Exec(
-		"INSERT INTO tasks (username, task_id, audio, status) VALUES ($1, $2, $3, $4)",
-		username, taskID, audio, "in progress",
-	)
-	return err
-}
-
-func (s *Store) GetStatusTask(taskID string) (string, error) {
-	var status string
-	err := s.db.QueryRow("SELECT status FROM tasks WHERE task_id = $1", taskID).Scan(&status)
-	return status, err
-}
-
-func (s *Store) GetResultTask(taskID string) (string, error) {
-	var result sql.NullString
-	err := s.db.QueryRow("SELECT result FROM tasks WHERE task_id = $1", taskID).Scan(&result)
-	if err != nil {
-		return "", err
-	}
-	if result.Valid {
-		return result.String, nil
-	}
-	return "in progress", nil
-}
-
-func (s *Store) AddResultTask(taskID string, text string) error {
-	service.LogDebug("ADD RESULT TASK IS WORKING!")
-	service.LogDebug("TEXT: %s", text)
-	_, err := s.db.Exec("UPDATE tasks SET result = $2, status = 'completed' WHERE task_id = $1", taskID, text)
-	return err
-}
-
-func (s *Store) UpdateTaskFailed(taskID string) error {
-	_, err := s.db.Exec("UPDATE tasks SET status = 'failed' WHERE task_id = $1", taskID)
-	return err
-}
-
 func (s *Store) ExistUsername(username string) (bool, error) {
 	var exists bool
 	err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)", username).Scan(&exists)
@@ -91,17 +53,8 @@ func (s *Store) ExistUsername(username string) (bool, error) {
 	return exists, nil
 }
 
-func (s *Store) ExistTask(taskID string, username string) (bool, error) {
-	var exists bool
-	err := s.db.QueryRow(
-		"SELECT EXISTS(SELECT 1 FROM tasks WHERE task_id = $1 AND username = $2)",
-		taskID, username,
-	).Scan(&exists)
-	return exists, err
-}
-
-func (s *Store) DeleteTask(taskID string, username string) error {
-	result, err := s.db.Exec("DELETE FROM tasks WHERE task_id = $1 AND username = $2", taskID, username)
+func (s *Store) DeleteTask(ctx context.Context, taskID string, username string) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM tasks WHERE task_id = $1 AND username = $2", taskID, username)
 	if err != nil {
 		return err
 	}
@@ -110,7 +63,7 @@ func (s *Store) DeleteTask(taskID string, username string) error {
 		return err
 	}
 	if rows == 0 {
-		return fmt.Errorf("task not found")
+		return sql.ErrNoRows
 	}
 	return nil
 }
@@ -136,7 +89,7 @@ func (s *Store) GetTasksWithPagination(username string, page, pageSize int) ([]t
 	}
 	defer rows.Close()
 
-	var tasks []types.TaskInfo
+	tasks := make([]types.TaskInfo, 0)
 	for rows.Next() {
 		var task types.TaskInfo
 		var createdAt time.Time
@@ -147,4 +100,11 @@ func (s *Store) GetTasksWithPagination(username string, page, pageSize int) ([]t
 		tasks = append(tasks, task)
 	}
 	return tasks, total, rows.Err()
+}
+
+func (s *Store) ReadTask(ctx context.Context, taskID, owner string) (string, *string, error) {
+	var status string
+	var result *string
+	err := s.db.QueryRowContext(ctx, "SELECT status, result FROM tasks WHERE task_id = $1 AND username = $2", taskID, owner).Scan(&status, &result)
+	return status, result, err
 }

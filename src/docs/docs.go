@@ -22,7 +22,7 @@ const docTemplate = `{
                         "ApiKeyAuth": []
                     }
                 ],
-                "description": "Sends audio file for speech to text conversion",
+                "description": "Sends audio URL for speech to text conversion",
                 "consumes": [
                     "application/json"
                 ],
@@ -35,17 +35,23 @@ const docTemplate = `{
                 "summary": "Upload audio for processing",
                 "parameters": [
                     {
-                        "description": "Audio data",
+                        "description": "Audio URL",
                         "name": "request",
                         "in": "body",
                         "required": true,
                         "schema": {
                             "$ref": "#/definitions/types.AudioRequest"
                         }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Reuse with the same audio URL to get the original task ID",
+                        "name": "Idempotency-Key",
+                        "in": "header"
                     }
                 ],
                 "responses": {
-                    "200": {
+                    "202": {
                         "description": "Task ID created",
                         "schema": {
                             "$ref": "#/definitions/types.GetInfoResponse"
@@ -59,6 +65,12 @@ const docTemplate = `{
                     },
                     "401": {
                         "description": "Unauthorized",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "409": {
+                        "description": "Idempotency key already used",
                         "schema": {
                             "type": "string"
                         }
@@ -114,6 +126,49 @@ const docTemplate = `{
                     },
                     "401": {
                         "description": "Invalid credentials",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/logout": {
+            "post": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Invalidates the user session",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Logout",
+                "responses": {
+                    "200": {
+                        "description": "Logged out",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
                         "schema": {
                             "type": "string"
                         }
@@ -196,13 +251,11 @@ const docTemplate = `{
                 "summary": "Get processing result",
                 "parameters": [
                     {
+                        "type": "string",
                         "description": "Task ID",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/types.GetInfoResponse"
-                        }
+                        "name": "task_id",
+                        "in": "query",
+                        "required": true
                     }
                 ],
                 "responses": {
@@ -224,8 +277,8 @@ const docTemplate = `{
                             "type": "string"
                         }
                     },
-                    "403": {
-                        "description": "Forbidden",
+                    "404": {
+                        "description": "Task not found",
                         "schema": {
                             "type": "string"
                         }
@@ -259,13 +312,11 @@ const docTemplate = `{
                 "summary": "Get task status",
                 "parameters": [
                     {
+                        "type": "string",
                         "description": "Task ID",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/types.GetInfoResponse"
-                        }
+                        "name": "task_id",
+                        "in": "query",
+                        "required": true
                     }
                 ],
                 "responses": {
@@ -287,8 +338,8 @@ const docTemplate = `{
                             "type": "string"
                         }
                     },
-                    "403": {
-                        "description": "Forbidden",
+                    "404": {
+                        "description": "Task not found",
                         "schema": {
                             "type": "string"
                         }
@@ -343,14 +394,115 @@ const docTemplate = `{
                             "$ref": "#/definitions/types.TaskListResponse"
                         }
                     },
-                    "400": {
-                        "description": "Validation error",
+                    "401": {
+                        "description": "Unauthorized",
                         "schema": {
                             "type": "string"
                         }
                     },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/tasks/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "tasks"
+                ],
+                "summary": "Get transcription task",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/types.GetResultResponse"
+                        }
+                    },
                     "401": {
                         "description": "Unauthorized",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Task not found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Deletes a task by ID; only the owner can delete",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "tasks"
+                ],
+                "summary": "Delete a task",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Task deleted",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Task not found",
                         "schema": {
                             "type": "string"
                         }
@@ -396,7 +548,13 @@ const docTemplate = `{
         "types.GetResultResponse": {
             "type": "object",
             "properties": {
+                "error": {
+                    "type": "string"
+                },
                 "result": {
+                    "type": "string"
+                },
+                "status": {
                     "type": "string"
                 }
             }
@@ -460,8 +618,9 @@ const docTemplate = `{
     },
     "securityDefinitions": {
         "ApiKeyAuth": {
+            "description": "Session cookie obtained from POST /login.",
             "type": "apiKey",
-            "name": "Authorization",
+            "name": "Cookie",
             "in": "header"
         }
     }

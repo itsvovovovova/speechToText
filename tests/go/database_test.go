@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
 	"testing"
+
+	"github.com/google/uuid"
+	"speechToText/src/db"
 )
 
 func TestGetTasksWithPagination(t *testing.T) {
@@ -16,7 +20,7 @@ func TestGetTasksWithPagination(t *testing.T) {
 		expectErr bool
 	}{
 		{name: "Valid pagination", username: "testuser", page: 1, pageSize: 10},
-		{name: "Invalid page (zero)", username: "testuser", page: 0, pageSize: 10},
+		{name: "Invalid page (zero)", username: "testuser", page: 0, pageSize: 10, expectErr: true},
 		{name: "Invalid page size (zero)", username: "testuser", page: 1, pageSize: 0},
 		{name: "Empty username", username: "", page: 1, pageSize: 10},
 	}
@@ -30,7 +34,7 @@ func TestGetTasksWithPagination(t *testing.T) {
 			if !tt.expectErr && err != nil {
 				t.Errorf("Unexpected error: %v", err)
 			}
-			if tasks == nil {
+			if !tt.expectErr && tasks == nil {
 				t.Errorf("Tasks should not be nil")
 			}
 			if total < 0 {
@@ -56,7 +60,7 @@ func TestDeleteTask(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := testStore.DeleteTask(tt.taskID, tt.username)
+			err := testStore.DeleteTask(context.Background(), tt.taskID, tt.username)
 			if tt.expectErr && err == nil {
 				t.Errorf("Expected error but got none")
 			}
@@ -65,63 +69,31 @@ func TestDeleteTask(t *testing.T) {
 			}
 		})
 	}
+}
+
+func seedUser(t *testing.T, username, password string) {
+	t.Helper()
+	hash, err := db.HashPassword(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := testStore.AddAuthData(username, hash); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = testSQL.Exec("DELETE FROM users WHERE username = $1", username) })
 }
 
 func TestUserExists(t *testing.T) {
 	if testStore == nil {
 		t.Skip("DB not available")
 	}
-	tests := []struct {
-		name      string
-		username  string
-		expectErr bool
-	}{
-		{name: "Existing user", username: "testuser"},
-		{name: "Non-existing user", username: "nonexistentuser"},
-		{name: "Empty username", username: ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			exists, err := testStore.ExistUsername(tt.username)
-			if tt.expectErr && err == nil {
-				t.Errorf("Expected error but got none")
-			}
-			if !tt.expectErr && err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-			if exists && tt.username == "" {
-				t.Errorf("Empty username should not exist")
-			}
-		})
-	}
-}
-
-func TestCreateUser(t *testing.T) {
-	if testStore == nil {
-		t.Skip("DB not available")
-	}
-	tests := []struct {
-		name      string
-		username  string
-		password  string
-		expectErr bool
-	}{
-		{name: "Valid user creation", username: "newuser", password: "newpass"},
-		{name: "Empty username", username: "", password: "newpass", expectErr: true},
-		{name: "Empty password", username: "newuser", password: "", expectErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := testStore.AddAuthData(tt.username, tt.password)
-			if tt.expectErr && err == nil {
-				t.Errorf("Expected error but got none")
-			}
-			if !tt.expectErr && err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-		})
+	username := uuid.NewString()
+	seedUser(t, username, "test-password")
+	for candidate, want := range map[string]bool{username: true, uuid.NewString(): false, "": false} {
+		got, err := testStore.ExistUsername(candidate)
+		if err != nil || got != want {
+			t.Errorf("ExistUsername(%q) = %v, %v; want %v", candidate, got, err, want)
+		}
 	}
 }
 
@@ -129,31 +101,20 @@ func TestValidateUser(t *testing.T) {
 	if testStore == nil {
 		t.Skip("DB not available")
 	}
-	tests := []struct {
-		name      string
-		username  string
-		password  string
-		expectErr bool
+	username := uuid.NewString()
+	seedUser(t, username, "test-password")
+	for _, test := range []struct {
+		username, password string
+		valid              bool
 	}{
-		{name: "Valid user validation", username: "testuser", password: "testpass"},
-		{name: "Invalid username", username: "wronguser", password: "testpass"},
-		{name: "Invalid password", username: "testuser", password: "wrongpass"},
-		{name: "Empty username", username: "", password: "testpass", expectErr: true},
-		{name: "Empty password", username: "testuser", password: "", expectErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			valid, err := testStore.CheckAuthData(tt.username, tt.password)
-			if tt.expectErr && err == nil {
-				t.Errorf("Expected error but got none")
-			}
-			if !tt.expectErr && err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-			if valid && (tt.username == "" || tt.password == "") {
-				t.Errorf("Empty credentials should not be valid")
-			}
-		})
+		{username, "test-password", true},
+		{username, "wrong-password", false},
+		{uuid.NewString(), "test-password", false},
+		{username, "", false},
+	} {
+		valid, err := testStore.CheckAuthData(test.username, test.password)
+		if err != nil || valid != test.valid {
+			t.Errorf("CheckAuthData = %v, %v; want %v", valid, err, test.valid)
+		}
 	}
 }

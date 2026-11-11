@@ -2,50 +2,33 @@ package consumer
 
 import (
 	"context"
-	"fmt"
-	"speechToText/src/config"
-	"speechToText/src/db"
-	"speechToText/src/service"
-	"speechToText/src/types"
-
-	"github.com/google/uuid"
+	"errors"
 
 	listen "github.com/deepgram/deepgram-go-sdk/pkg/api/listen/v1/rest"
-	interfaces "github.com/deepgram/deepgram-go-sdk/pkg/client/interfaces"
+	"github.com/deepgram/deepgram-go-sdk/pkg/client/interfaces"
 	client "github.com/deepgram/deepgram-go-sdk/pkg/client/listen"
 )
 
-func CreateTask(store *db.Store, producer *Producer, username string, request types.AudioRequest) (string, error) {
-	taskID := uuid.New().String()
-	if err := store.AddAudioTask(taskID, username, request.Audio); err != nil {
-		return "", err
-	}
-	if err := producer.Send(taskID, "queue", request.Audio); err != nil {
-		return "", err
-	}
-	return taskID, nil
-}
+var errNoTranscript = errors.New("no transcription result returned by Deepgram")
 
-func ConvertToText(audioUrl string) (string, error) {
-	ctx := context.Background()
-	service.LogDebug("AUDIO URL: %s", audioUrl)
-	options := &interfaces.PreRecordedTranscriptionOptions{
-		Model:    "nova-2",
-		Language: "en",
+func NewTranscriber(apiKey string) (func(context.Context, string) (string, error), error) {
+	c := client.NewREST(apiKey, &interfaces.ClientOptions{})
+	if c == nil {
+		return nil, errors.New("Deepgram client initialization failed: check DEEPGRAM_API")
 	}
-
-	c := client.NewREST(config.CurrentConfig.Deepgram.ApiKey, &interfaces.ClientOptions{})
 	dg := listen.New(c)
-
-	res, err := dg.FromURL(ctx, audioUrl, options)
-	if err != nil {
-		service.LogError("FromURL failed. Err: %v", err)
-		return "", err
-	}
-
-	if len(res.Results.Channels) == 0 || len(res.Results.Channels[0].Alternatives) == 0 {
-		return "", fmt.Errorf("no transcription result returned by Deepgram")
-	}
-
-	return res.Results.Channels[0].Alternatives[0].Transcript, nil
+	return func(ctx context.Context, audioURL string) (string, error) {
+		options := &interfaces.PreRecordedTranscriptionOptions{
+			Model:    "nova-2",
+			Language: "en",
+		}
+		res, err := dg.FromURL(ctx, audioURL, options)
+		if err != nil {
+			return "", err
+		}
+		if len(res.Results.Channels) == 0 || len(res.Results.Channels[0].Alternatives) == 0 {
+			return "", errNoTranscript
+		}
+		return res.Results.Channels[0].Alternatives[0].Transcript, nil
+	}, nil
 }

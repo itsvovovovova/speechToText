@@ -1,9 +1,11 @@
 global:
   scrape_interval: 15s
 
+rule_files: [/etc/prometheus/alerts.yml]
+
 scrape_configs:
   - job_name: 'go-app'
     static_configs:
-      - targets: ['server:8080']
+      - targets: ['server:8080', 'worker:8081']
     scrape_interval: 5s
     metrics_path: /metrics

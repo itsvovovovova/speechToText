@@ -22,9 +22,12 @@ func LogError(format string, args ...interface{}) {
 }
 
 func ReadAuthRequest(r *http.Request) (types.AuthRequest, error) {
-	data, err := io.ReadAll(r.Body)
+	data, err := io.ReadAll(io.LimitReader(r.Body, 16<<10+1))
 	if err != nil {
 		return types.AuthRequest{}, err
+	}
+	if len(data) > 16<<10 {
+		return types.AuthRequest{}, fmt.Errorf("request too large")
 	}
 	var authData types.AuthRequest
 	if err = json.Unmarshal(data, &authData); err != nil {

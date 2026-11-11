@@ -1,0 +1,31 @@
+rule_files: [alerts.yml]
+evaluation_interval: 30s
+tests:
+  - interval: 30s
+    input_series:
+      - series: 'transcription_oldest_pending_seconds{instance="server:8080",job="go-app"}'
+        values: '0 121 125 130 0 0'
+      - series: 'up{instance="worker:8081",job="go-app"}'
+        values: '1 0 0 0 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: TranscriptionBacklogStalled
+        exp_alerts: []
+      - eval_time: 90s
+        alertname: TranscriptionBacklogStalled
+        exp_alerts:
+          - exp_labels: {instance: 'server:8080', job: go-app, severity: warning}
+            exp_annotations:
+              summary: A transcription has been pending for over two minutes
+      - eval_time: 90s
+        alertname: SpeechToTextTargetDown
+        exp_alerts:
+          - exp_labels: {instance: 'worker:8081', job: go-app, severity: critical}
+            exp_annotations:
+              summary: A SpeechToText metrics target is unreachable
+      - eval_time: 2m
+        alertname: SpeechToTextTargetDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: TranscriptionBacklogStalled
+        exp_alerts: []

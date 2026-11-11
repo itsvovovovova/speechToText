@@ -8,25 +8,25 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"speechToText/src/cache"
-	"speechToText/src/consumer"
-	"speechToText/src/db"
-	"speechToText/src/service"
-	"speechToText/src/types"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+
+	"speechToText/src/cache"
+	"speechToText/src/db"
+	"speechToText/src/service"
+	"speechToText/src/types"
 )
 
 // Handlers holds all service dependencies for HTTP handlers.
 type Handlers struct {
-	store    *db.Store
-	session  *cache.RedisSessionManager
-	producer *consumer.Producer
+	store   *db.Store
+	session *cache.RedisSessionManager
 }
 
-func NewHandlers(store *db.Store, session *cache.RedisSessionManager, producer *consumer.Producer) *Handlers {
-	return &Handlers{store: store, session: session, producer: producer}
+func NewHandlers(store *db.Store, session *cache.RedisSessionManager) *Handlers {
+	return &Handlers{store: store, session: session}
 }
 
 func validateAudioURL(audioURL string) error {
@@ -34,19 +34,20 @@ func validateAudioURL(audioURL string) error {
 		return fmt.Errorf("audio URL is required")
 	}
 	u, err := url.Parse(audioURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
 		return fmt.Errorf("invalid audio URL: must be an http or https URL")
 	}
 	return nil
 }
 
-func writeJSON(w http.ResponseWriter, v any) {
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	response, err := json.Marshal(v)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	if _, err := w.Write(response); err != nil {
 		service.LogError("Write error: %v", err)
 	}
@@ -60,7 +61,9 @@ func writeJSON(w http.ResponseWriter, v any) {
 // @Produce json
 // @Security ApiKeyAuth
 // @Param request body types.AudioRequest true "Audio URL"
-// @Success 200 {object} types.GetInfoResponse "Task ID created"
+// @Param Idempotency-Key header string false "Reuse with the same audio URL to get the original task ID"
+// @Failure 409 {string} string "Idempotency key already used"
+// @Success 202 {object} types.GetInfoResponse "Task ID created"
 // @Failure 400 {string} string "Validation error"
 // @Failure 401 {string} string "Unauthorized"
 // @Failure 500 {string} string "Internal server error"
@@ -78,7 +81,7 @@ func (h *Handlers) Audio(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	data, err := io.ReadAll(r.Body)
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<10))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -92,12 +95,22 @@ func (h *Handlers) Audio(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	taskID, err := consumer.CreateTask(h.store, h.producer, username, request)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	key := r.Header.Get("Idempotency-Key")
+	if len(key) > 128 {
+		http.Error(w, "Idempotency-Key too long", http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, types.GetInfoResponse{Task_id: taskID})
+	taskID, err := h.store.Enqueue(r.Context(), uuid.NewString(), username, request.Audio, key)
+	if errors.Is(err, db.ErrIdempotencyConflict) {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Location", "/tasks/"+taskID)
+	writeJSON(w, http.StatusAccepted, types.GetInfoResponse{Task_id: taskID})
 }
 
 // Status godoc
@@ -111,7 +124,7 @@ func (h *Handlers) Audio(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} types.GetStatusResponse "Task status"
 // @Failure 400 {string} string "Validation error"
 // @Failure 401 {string} string "Unauthorized"
-// @Failure 403 {string} string "Forbidden"
+// @Failure 404 {string} string "Task not found"
 // @Failure 500 {string} string "Internal server error"
 // @Router /status [get]
 func (h *Handlers) Status(w http.ResponseWriter, r *http.Request) {
@@ -130,25 +143,16 @@ func (h *Handlers) Status(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "task_id is required", http.StatusBadRequest)
 		return
 	}
-	exist, err := h.store.ExistTask(taskID, username)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if !exist {
-		http.Error(w, "Forbidden", http.StatusForbidden)
-		return
-	}
-	status, err := h.store.GetStatusTask(taskID)
+	status, _, err := h.store.ReadTask(r.Context(), taskID, username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "task not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, types.GetStatusResponse{Status: status})
+	writeJSON(w, http.StatusOK, types.GetStatusResponse{Status: status})
 }
 
 // Result godoc
@@ -162,7 +166,7 @@ func (h *Handlers) Status(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} types.GetResultResponse "Processing result"
 // @Failure 400 {string} string "Validation error"
 // @Failure 401 {string} string "Unauthorized"
-// @Failure 403 {string} string "Forbidden"
+// @Failure 404 {string} string "Task not found"
 // @Failure 500 {string} string "Internal server error"
 // @Router /result [get]
 func (h *Handlers) Result(w http.ResponseWriter, r *http.Request) {
@@ -176,30 +180,43 @@ func (h *Handlers) Result(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	taskID := r.URL.Query().Get("task_id")
+	taskID := chi.URLParam(r, "id")
+	if taskID == "" {
+		taskID = r.URL.Query().Get("task_id")
+	}
 	if taskID == "" {
 		http.Error(w, "task_id is required", http.StatusBadRequest)
 		return
 	}
-	exist, err := h.store.ExistTask(taskID, username)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if !exist {
-		http.Error(w, "Forbidden", http.StatusForbidden)
-		return
-	}
-	result, err := h.store.GetResultTask(taskID)
+	status, result, err := h.store.ReadTask(r.Context(), taskID, username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "task not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, types.GetResultResponse{Result: result})
+	response := types.GetResultResponse{Status: status, Result: result}
+	if status == "failed" {
+		response.Error = "transcription_failed"
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// GetTask godoc
+// @Summary Get transcription task
+// @Tags tasks
+// @Produce json
+// @Security ApiKeyAuth
+// @Param id path string true "Task ID"
+// @Success 200 {object} types.GetResultResponse
+// @Failure 401 {string} string "Unauthorized"
+// @Failure 404 {string} string "Task not found"
+// @Failure 500 {string} string "Internal server error"
+// @Router /tasks/{id} [get]
+func (h *Handlers) GetTask(w http.ResponseWriter, r *http.Request) {
+	h.Result(w, r)
 }
 
 // Tasks godoc
@@ -243,12 +260,12 @@ func (h *Handlers) Tasks(w http.ResponseWriter, r *http.Request) {
 
 	tasks, total, err := h.store.GetTasksWithPagination(username, page, pageSize)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	totalPages := int((total + int64(pageSize) - 1) / int64(pageSize))
-	writeJSON(w, types.TaskListResponse{
+	writeJSON(w, http.StatusOK, types.TaskListResponse{
 		Tasks: tasks,
 		Pagination: types.PaginationResponse{
 			Page:       page,
@@ -269,7 +286,7 @@ func (h *Handlers) Tasks(w http.ResponseWriter, r *http.Request) {
 // @Param id path string true "Task ID"
 // @Success 200 {object} map[string]string "Task deleted"
 // @Failure 401 {string} string "Unauthorized"
-// @Failure 403 {string} string "Forbidden"
+// @Failure 404 {string} string "Task not found"
 // @Failure 500 {string} string "Internal server error"
 // @Router /tasks/{id} [delete]
 func (h *Handlers) DeleteTask(w http.ResponseWriter, r *http.Request) {
@@ -288,18 +305,13 @@ func (h *Handlers) DeleteTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "task id is required", http.StatusBadRequest)
 		return
 	}
-	exist, err := h.store.ExistTask(taskID, username)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if err := h.store.DeleteTask(r.Context(), taskID, username); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "task not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	if !exist {
-		http.Error(w, "Forbidden", http.StatusForbidden)
-		return
-	}
-	if err := h.store.DeleteTask(taskID, username); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]string{"result": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"result": "ok"})
 }

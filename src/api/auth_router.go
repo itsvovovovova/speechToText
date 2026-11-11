@@ -27,12 +27,12 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 	}
 	hashPassword, err := db.HashPassword(user.Password)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	exist, err := h.store.ExistUsername(user.Username)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	if exist {
@@ -40,10 +40,10 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.AddAuthData(user.Username, hashPassword); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{"result": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"result": "ok"})
 }
 
 // Login godoc
@@ -68,7 +68,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	exist, err := h.store.CheckAuthData(user.Username, user.Password)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	if !exist {
@@ -78,14 +78,14 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	session, err := h.session.SessionStart(ctx, w, r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	if err := session.Set(ctx, "username", user.Username); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{
+	writeJSON(w, http.StatusOK, map[string]string{
 		"result": "ok",
 		"token":  session.SessionId,
 	})
@@ -109,8 +109,8 @@ func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.session.SessionDestroy(r.Context(), w, session.SessionId); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{"result": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"result": "ok"})
 }

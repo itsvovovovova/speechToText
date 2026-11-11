@@ -77,12 +77,11 @@ def test_login_nonexistent_user(api_client):
 def test_protected_endpoints(auth_client):
     audio_data = {"audio": "https://static.deepgram.com/examples/Bueller-Life-moves-pretty-fast.wav"}
     audio_response = auth_client.post(f"{BASE_URL}/audio", json=audio_data)
-    assert audio_response.status_code == 200
+    assert audio_response.status_code == 202
 
     task_id = audio_response.json()["task_id"]
     assert task_id != ""
 
-    time.sleep(5)
 
     status_response = auth_client.get(f"{BASE_URL}/status", params={"task_id": task_id})
     assert status_response.status_code == 200
@@ -97,7 +96,7 @@ def test_invalid_audio_url(auth_client):
 def test_delete_task(auth_client):
     audio_data = {"audio": "https://static.deepgram.com/examples/Bueller-Life-moves-pretty-fast.wav"}
     audio_response = auth_client.post(f"{BASE_URL}/audio", json=audio_data)
-    assert audio_response.status_code == 200
+    assert audio_response.status_code == 202
 
     task_id = audio_response.json()["task_id"]
     delete_response = auth_client.delete(f"{BASE_URL}/tasks/{task_id}")

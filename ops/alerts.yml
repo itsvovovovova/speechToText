@@ -1,0 +1,17 @@
+groups:
+  - name: transcription
+    rules:
+      - alert: TranscriptionBacklogStalled
+        expr: transcription_oldest_pending_seconds > 120
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: A transcription has been pending for over two minutes
+      - alert: SpeechToTextTargetDown
+        expr: up{job="go-app"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: A SpeechToText metrics target is unreachable

@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"speechToText/src/types"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestRegister(t *testing.T) {
@@ -18,7 +20,7 @@ func TestRegister(t *testing.T) {
 	}{
 		{
 			name:           "Valid registration",
-			requestBody:    types.AuthRequest{Username: "testuser", Password: "testpass1"},
+			requestBody:    types.AuthRequest{Username: uuid.NewString(), Password: "testpass1"},
 			expectedStatus: 200,
 			expectedResult: "ok",
 			needsDB:        true,
@@ -74,7 +76,7 @@ func TestLogin(t *testing.T) {
 	}{
 		{
 			name:           "Valid login",
-			requestBody:    types.AuthRequest{Username: "testuser", Password: "testpass1"},
+			requestBody:    types.AuthRequest{Username: uuid.NewString(), Password: "testpass1"},
 			expectedStatus: 200,
 			expectToken:    true,
 			needsDB:        true,
@@ -96,6 +98,9 @@ func TestLogin(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.needsDB && testStore == nil {
 				t.Skip("DB not available")
+			}
+			if tt.expectToken {
+				seedUser(t, tt.requestBody.Username, tt.requestBody.Password)
 			}
 			jsonBody, _ := json.Marshal(tt.requestBody)
 			req := httptest.NewRequest("POST", "/login", bytes.NewBuffer(jsonBody))

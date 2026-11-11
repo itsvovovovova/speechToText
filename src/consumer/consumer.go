@@ -3,168 +3,188 @@ package consumer
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"log"
-	"sync"
+	"time"
 
+	"github.com/deepgram/deepgram-go-sdk/pkg/client/interfaces"
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	"speechToText/src/config"
 	"speechToText/src/db"
-	"speechToText/src/types"
+	"speechToText/src/metrics"
 )
 
-// Producer manages a lazily-initialised RabbitMQ producer connection.
-type Producer struct {
-	url  string
-	mu   sync.Mutex
-	conn *amqp.Connection
-	ch   *amqp.Channel
+const queueName = "transcription.v2"
+
+type delivery struct {
+	TaskID  string `json:"task_id"`
+	Attempt int    `json:"attempt"`
 }
 
-func NewProducer(url string) *Producer {
-	return &Producer{url: url}
+func connect(url string) (*amqp.Connection, error) {
+	return amqp.DialConfig(url, amqp.Config{Dial: amqp.DefaultDial(5 * time.Second), Heartbeat: 5 * time.Second, Locale: "en_US"})
 }
 
-func (p *Producer) channel() (*amqp.Channel, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.conn == nil || p.conn.IsClosed() {
-		conn, err := amqp.Dial(p.url)
-		if err != nil {
-			return nil, err
-		}
-		p.conn = conn
-		p.ch = nil
-	}
-
-	if p.ch == nil {
-		ch, err := p.conn.Channel()
-		if err != nil {
-			return nil, err
-		}
-		p.ch = ch
-	}
-
-	return p.ch, nil
-}
-
-func (p *Producer) resetChannel() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.ch = nil
-}
-
-func (p *Producer) Send(taskID string, queueName string, audioUrl string) error {
-	ch, err := p.channel()
-	if err != nil {
+func declare(ch *amqp.Channel) error {
+	if _, err := ch.QueueDeclare(queueName+".dead", true, false, false, false, nil); err != nil {
 		return err
 	}
-
-	if _, err = ch.QueueDeclare(queueName, false, false, false, false, nil); err != nil {
-		p.resetChannel()
-		return err
-	}
-
-	body, err := json.Marshal(types.AudioMessage{TaskID: taskID, Audio: audioUrl})
-	if err != nil {
-		return err
-	}
-
-	err = ch.Publish("", queueName, false, false, amqp.Publishing{
-		ContentType: "application/json",
-		Body:        body,
+	_, err := ch.QueueDeclare(queueName, true, false, false, false, amqp.Table{
+		"x-dead-letter-exchange":    "",
+		"x-dead-letter-routing-key": queueName + ".dead",
 	})
-	if err != nil {
-		p.resetChannel()
-	}
 	return err
 }
 
-func (p *Producer) Close() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.conn != nil && !p.conn.IsClosed() {
-		return p.conn.Close()
-	}
-	return nil
-}
-
-// Consumer processes messages from a RabbitMQ queue.
-type Consumer struct {
-	store *db.Store
-}
-
-func NewConsumer(store *db.Store) *Consumer {
-	return &Consumer{store: store}
-}
-
-func (c *Consumer) Receive(queueName string, ctx context.Context) error {
-	connection, err := amqp.Dial(config.CurrentConfig.RabbitMQ.Url)
-	if err != nil {
-		return err
-	}
-	defer connection.Close()
-
-	channel, err := connection.Channel()
-	if err != nil {
-		return err
-	}
-	defer channel.Close()
-
-	queue, err := channel.QueueDeclare(queueName, false, false, false, false, nil)
-	if err != nil {
-		return err
-	}
-
-	messages, err := channel.ConsumeWithContext(ctx, queue.Name, "", false, false, true, false, nil)
-	if err != nil {
-		return err
-	}
-
-	go func() {
-		for {
-			select {
-			case msg, ok := <-messages:
-				if !ok {
-					fmt.Println("Channel closed")
-					return
+func RunPublisher(ctx context.Context, store *db.Store, url string) {
+	supervise(ctx, "publisher", url, func(ctx context.Context, ch *amqp.Channel) error {
+		returned := ch.NotifyReturn(make(chan amqp.Return, 1))
+		if err := ch.Confirm(false); err != nil {
+			return err
+		}
+		for ctx.Err() == nil {
+			attemptCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			found, err := store.PublishNext(attemptCtx, func(ctx context.Context, id string, attempt int) error {
+				body, err := json.Marshal(delivery{TaskID: id, Attempt: attempt})
+				if err != nil {
+					return err
 				}
-				if err := c.processMessage(msg); err != nil {
-					fmt.Println("error:", err)
-					if err := msg.Nack(false, true); err != nil {
-						return
-					}
-				} else {
-					if err := msg.Ack(false); err != nil {
-						return
-					}
+				confirmation, err := ch.PublishWithDeferredConfirmWithContext(ctx, "", queueName, true, false, amqp.Publishing{
+					ContentType:  "application/json",
+					DeliveryMode: amqp.Persistent,
+					Body:         body,
+				})
+				if err != nil {
+					return err
 				}
-			case <-ctx.Done():
-				return
+				ok, err := confirmation.WaitContext(ctx)
+				if err == nil && !ok {
+					return errors.New("broker rejected publication")
+				}
+				select {
+				case <-returned:
+					return errors.New("publication was unroutable")
+				default:
+					return err
+				}
+			})
+			cancel()
+			if err != nil {
+				return err
+			}
+			if !found {
+				pause(ctx, 300*time.Millisecond)
 			}
 		}
-	}()
-
-	log.Printf(" [*] Waiting for messages. To exit press CTRL+C")
-	<-ctx.Done()
-	return nil
+		return ctx.Err()
+	})
 }
 
-func (c *Consumer) processMessage(data amqp.Delivery) error {
-	var audio types.AudioMessage
-	if err := json.Unmarshal(data.Body, &audio); err != nil {
-		return err
+func RunWorker(ctx context.Context, store *db.Store, url string, setReady func(bool), m *metrics.WorkerMetrics, transcribe func(context.Context, string) (string, error)) {
+	supervise(ctx, "worker", url, func(ctx context.Context, ch *amqp.Channel) error {
+		if err := ch.Qos(1, 0, false); err != nil {
+			return err
+		}
+		messages, err := ch.ConsumeWithContext(ctx, queueName, "", false, false, false, false, nil)
+		if err != nil {
+			return err
+		}
+		setReady(true)
+		defer setReady(false)
+		for message := range messages {
+			if ctx.Err() != nil {
+				break
+			}
+			var task delivery
+			if json.Unmarshal(message.Body, &task) != nil || task.TaskID == "" || task.Attempt < 1 {
+				if err := message.Reject(false); err != nil {
+					return err
+				}
+				continue
+			}
+			taskCtx, cancel := context.WithTimeout(ctx, 40*time.Second)
+			outcome, err := store.ProcessTask(taskCtx, task.TaskID, task.Attempt, func(audio string) (string, bool, error) {
+				providerCtx, stop := context.WithTimeout(taskCtx, 30*time.Second)
+				defer stop()
+				start := time.Now()
+				result, err := transcribe(providerCtx, audio)
+				retry := !errors.Is(err, errNoTranscript)
+				var rejected *interfaces.StatusError
+				if errors.As(err, &rejected) {
+					status := rejected.Resp.StatusCode
+					retry = status == 408 || status == 429 || status >= 500
+				}
+				if m != nil {
+					outcome := "success"
+					if err != nil {
+						outcome = "permanent_error"
+						if retry {
+							outcome = "retryable_error"
+						}
+					}
+					m.ProviderDuration.WithLabelValues(outcome).Observe(time.Since(start).Seconds())
+				}
+				return result, retry, err
+			})
+			cancel()
+			if errors.Is(err, db.ErrDeliveryPending) {
+				// Confirmation can arrive just after the consumer receives the message.
+				pause(ctx, 300*time.Millisecond)
+				if err = message.Nack(false, true); err != nil {
+					return err
+				}
+				continue
+			}
+			if err != nil {
+				return err // Closing the channel requeues its unacknowledged delivery.
+			}
+			if m != nil {
+				switch outcome.Status {
+				case "queued":
+					m.RetriesScheduled.Inc()
+				case "completed", "failed":
+					if outcome.Age > 0 {
+						m.TimeToResult.WithLabelValues(outcome.Status).Observe(outcome.Age.Seconds())
+					}
+				}
+			}
+			if err := message.Ack(false); err != nil {
+				return err
+			}
+		}
+		return errors.New("delivery channel closed")
+	})
+}
+
+func supervise(ctx context.Context, name, url string, run func(context.Context, *amqp.Channel) error) {
+	for ctx.Err() == nil {
+		err := func() error {
+			conn, err := connect(url)
+			if err != nil {
+				return err
+			}
+			defer conn.CloseDeadline(time.Now().Add(2 * time.Second))
+			ch, err := conn.Channel()
+			if err != nil {
+				return err
+			}
+			if err := declare(ch); err != nil {
+				return err
+			}
+			return run(ctx, ch)
+		}()
+		if ctx.Err() == nil {
+			log.Printf("%s stopped (%T), reconnecting", name, err)
+			pause(ctx, time.Second)
+		}
 	}
-	text, err := ConvertToText(audio.Audio)
-	if err != nil {
-		_ = c.store.UpdateTaskFailed(audio.TaskID)
-		return err
+}
+
+func pause(ctx context.Context, delay time.Duration) {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
 	}
-	if err := c.store.AddResultTask(audio.TaskID, text); err != nil {
-		_ = c.store.UpdateTaskFailed(audio.TaskID)
-		return err
-	}
-	return nil
 }

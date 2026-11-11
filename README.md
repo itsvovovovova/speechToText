@@ -1,87 +1,24 @@
-## Speech-to-Text Recognition Service
+# SpeechToText
 
-<img width="1524" height="305" alt="image" src="https://github.com/user-attachments/assets/3586c131-5df5-4c08-81d3-01e49b0a9701" />
+Go API for transcribing audio URLs with Deepgram. PostgreSQL stores tasks and the outbox, RabbitMQ delivers jobs to the worker, and Redis stores login sessions.
 
+## Run locally
 
-### Project Overview
+Copy `.env.example` to `.env`, set `DEEPGRAM_API`, then run:
 
-**Speech-to-Text** is a modern service for converting speech to text using advanced speech recognition technologies. The project provides accurate audio-to-text conversion capabilities with robust monitoring and management features.
-
-### Technology Stack
-
-* **Programming Language**: Go (Golang)
-* **Database**: PostgreSQL
-* **Message Broker**: RabbitMQ
-* **Monitoring**:
-    * Prometheus
-    * Grafana
-* **External API Integration**
-* **Core Components**:
-    go-chi
-
-### API Endpoints
-
-* **POST /audio** — submit audio URL for recognition
-* **GET /status** — check processing status
-* **GET /result** — retrieve recognition result
-
-### Audio Requirements
-
-* **Supported Formats**:
-    * WAV (recommended)
-    * MP3
-    * FLAC
-    * OGG
-    * AAC
-
-### Installation & Setup
-
-1. **Clone the repository**:
-```bash
-git clone https://github.com/itsvovovova/speechToText.git
-cd speechToText
+```sh
+docker compose up --build -d postgres redis rabbitmq server worker prometheus grafana
 ```
 
-2. **Install dependencies**:
-```bash
-go mod tidy
+[Swagger](http://localhost:8080/swagger/index.html) · [Prometheus](http://localhost:9090) · [Grafana](http://localhost:3000/d/speech-overview)
+
+Register at `POST /register` and sign in at `POST /login`. Send the session cookie with `POST /audio` and a body like `{"audio":"https://example.com/clip.wav"}`. The response is `202 Accepted` with the task URL in `Location`. Poll that URL for the status and transcript. Reuse an `Idempotency-Key` to retry the same submission without creating another task.
+
+## Checks
+
+```sh
+docker compose -p stt-test run --build --rm tests
+docker compose -p stt-test down -v
 ```
 
-3. **Configure environment**:
-* Set up PostgreSQL connection
-* Configure RabbitMQ credentials
-* Configure Prometheus scraping
-
-Example .env:
-```
-DB_HOST=postgres
-DB_PORT=5432
-DB_USER=postgres
-DB_PASSWORD=postgres
-DB_NAME=database
-DB_SSL_MODE=disable
-LOG_LEVEL=debug
-LOG_FORMAT=text
-
-SERVER_HOST=localhost
-SERVER_PORT=8080
-HOST_PORT=8080
-
-REDIS_HOST=redis:6379
-
-RABBITMQ_HOST=rabbitmq
-RABBITMQ_PORT=5672
-RABBITMQ_USER_PORT=15672
-RABBITMQ_USER=GUEST
-RABBITMQ_PASSWORD=GUEST
-RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-
-DEEPGRAM_API=your_key_is_here
-```
-4. **Run the service**:
-```bash
-docker-compose up --build
-```
-### 📜 License
-
-This project is licensed under the MIT License.
+The Go suite uses PostgreSQL, Redis and RabbitMQ with a transcription stub. The HTTP smoke script in `ops/` is intended for a disposable Compose stack with the worker stopped.

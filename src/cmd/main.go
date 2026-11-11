@@ -17,7 +17,6 @@ import (
 	"speechToText/src/docs"
 	appmetrics "speechToText/src/metrics"
 	"speechToText/src/pkg/closer"
-	"sync"
 	"syscall"
 	"time"
 
@@ -34,7 +33,8 @@ import (
 // @BasePath /
 // @securityDefinitions.apikey ApiKeyAuth
 // @in header
-// @name Authorization
+// @name Cookie
+// @description Session cookie obtained from POST /login.
 func main() {
 	cl := closer.New()
 
@@ -44,17 +44,20 @@ func main() {
 	}
 	cl.Add(sqlDB.Close)
 	store := db.NewStore(sqlDB)
+	if len(os.Args) == 2 && os.Args[1] == "worker" {
+		err := runWorker(sqlDB, store)
+		cl.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	sessionProvider := cache.NewRedisSessionProvider(config.CurrentConfig.Redis.Host)
 	cl.Add(sessionProvider.Close)
 	sessionManager := cache.NewRedisSessionManager("session_id", sessionProvider, int64(math.Pow10(5)))
 
-	producer := consumer.NewProducer(config.CurrentConfig.RabbitMQ.Url)
-	cl.Add(producer.Close)
-
-	cons := consumer.NewConsumer(store)
-
-	handlers := api.NewHandlers(store, sessionManager, producer)
+	handlers := api.NewHandlers(store, sessionManager)
 	authMiddleware := auth.NewMiddleware(sessionManager)
 
 	docs.SwaggerInfo.Title = "Speech to Text API"
@@ -63,6 +66,7 @@ func main() {
 	docs.SwaggerInfo.Host = "localhost:" + config.CurrentConfig.Server.Port
 	docs.SwaggerInfo.BasePath = "/"
 
+	appmetrics.RegisterTaskMetrics(sqlDB)
 	m := appmetrics.NewMetrics()
 	r := chi.NewRouter()
 	r.Use(m.Middleware)
@@ -72,6 +76,15 @@ func main() {
 	))
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+		if sqlDB.PingContext(ctx) != nil || sessionProvider.Client.Ping(ctx).Err() != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	r.Get("/metrics", promhttp.Handler().ServeHTTP)
@@ -84,19 +97,15 @@ func main() {
 	r.With(authMiddleware).Get("/status", handlers.Status)
 	r.With(authMiddleware).Get("/result", handlers.Result)
 	r.With(authMiddleware).Get("/tasks", handlers.Tasks)
+	r.With(authMiddleware).Get("/tasks/{id}", handlers.GetTask)
 	r.With(authMiddleware).Delete("/tasks/{id}", handlers.DeleteTask)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-
-	var wg sync.WaitGroup
-
-	wg.Add(1)
+	publisherDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		if err := cons.Receive("queue", ctx); err != nil {
-			log.Println("consumer error:", err)
-		}
+		defer close(publisherDone)
+		consumer.RunPublisher(ctx, store, config.CurrentConfig.RabbitMQ.Url)
 	}()
 
 	server := &http.Server{
@@ -107,20 +116,17 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	wg.Add(1)
+	serverErr := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-		log.Printf("Server started on port %s\n", config.CurrentConfig.Server.Port)
-		log.Printf("Swagger UI: http://localhost:%s/swagger/index.html\n", config.CurrentConfig.Server.Port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("Server error: %v\n", err)
-		}
+		log.Printf("Server listening on port %s", config.CurrentConfig.Server.Port)
+		serverErr <- server.ListenAndServe()
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Println("Received shutdown signal, stopping server...")
+	var serveErr error
+	select {
+	case <-ctx.Done():
+	case serveErr = <-serverErr:
+	}
 
 	cancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -130,7 +136,9 @@ func main() {
 		log.Printf("Error stopping server: %v\n", err)
 	}
 
-	wg.Wait()
+	<-publisherDone
 	cl.Close()
-	log.Println("Server stopped successfully")
+	if serveErr != nil && serveErr != http.ErrServerClosed {
+		log.Fatal(serveErr)
+	}
 }

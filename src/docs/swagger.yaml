@@ -19,7 +19,11 @@ definitions:
     type: object
   types.GetResultResponse:
     properties:
+      error:
+        type: string
       result:
+        type: string
+      status:
         type: string
     type: object
   types.GetStatusResponse:
@@ -69,18 +73,22 @@ paths:
     post:
       consumes:
       - application/json
-      description: Sends audio file for speech to text conversion
+      description: Sends audio URL for speech to text conversion
       parameters:
-      - description: Audio data
+      - description: Audio URL
         in: body
         name: request
         required: true
         schema:
           $ref: '#/definitions/types.AudioRequest'
+      - description: Reuse with the same audio URL to get the original task ID
+        in: header
+        name: Idempotency-Key
+        type: string
       produces:
       - application/json
       responses:
-        "200":
+        "202":
           description: Task ID created
           schema:
             $ref: '#/definitions/types.GetInfoResponse'
@@ -90,6 +98,10 @@ paths:
             type: string
         "401":
           description: Unauthorized
+          schema:
+            type: string
+        "409":
+          description: Idempotency key already used
           schema:
             type: string
         "500":
@@ -137,6 +149,33 @@ paths:
       summary: User authentication
       tags:
       - auth
+  /logout:
+    post:
+      consumes:
+      - application/json
+      description: Invalidates the user session
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Logged out
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            type: string
+        "500":
+          description: Internal server error
+          schema:
+            type: string
+      security:
+      - ApiKeyAuth: []
+      summary: Logout
+      tags:
+      - auth
   /register:
     post:
       consumes:
@@ -176,11 +215,10 @@ paths:
       description: Returns audio to text conversion result
       parameters:
       - description: Task ID
-        in: body
-        name: request
+        in: query
+        name: task_id
         required: true
-        schema:
-          $ref: '#/definitions/types.GetInfoResponse'
+        type: string
       produces:
       - application/json
       responses:
@@ -196,8 +234,8 @@ paths:
           description: Unauthorized
           schema:
             type: string
-        "403":
-          description: Forbidden
+        "404":
+          description: Task not found
           schema:
             type: string
         "500":
@@ -216,11 +254,10 @@ paths:
       description: Returns current audio processing status
       parameters:
       - description: Task ID
-        in: body
-        name: request
+        in: query
+        name: task_id
         required: true
-        schema:
-          $ref: '#/definitions/types.GetInfoResponse'
+        type: string
       produces:
       - application/json
       responses:
@@ -236,8 +273,8 @@ paths:
           description: Unauthorized
           schema:
             type: string
-        "403":
-          description: Forbidden
+        "404":
+          description: Task not found
           schema:
             type: string
         "500":
@@ -272,10 +309,6 @@ paths:
           description: Tasks list
           schema:
             $ref: '#/definitions/types.TaskListResponse'
-        "400":
-          description: Validation error
-          schema:
-            type: string
         "401":
           description: Unauthorized
           schema:
@@ -289,9 +322,78 @@ paths:
       summary: Get tasks list with pagination
       tags:
       - tasks
+  /tasks/{id}:
+    delete:
+      consumes:
+      - application/json
+      description: Deletes a task by ID; only the owner can delete
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Task deleted
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            type: string
+        "404":
+          description: Task not found
+          schema:
+            type: string
+        "500":
+          description: Internal server error
+          schema:
+            type: string
+      security:
+      - ApiKeyAuth: []
+      summary: Delete a task
+      tags:
+      - tasks
+    get:
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/types.GetResultResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            type: string
+        "404":
+          description: Task not found
+          schema:
+            type: string
+        "500":
+          description: Internal server error
+          schema:
+            type: string
+      security:
+      - ApiKeyAuth: []
+      summary: Get transcription task
+      tags:
+      - tasks
 securityDefinitions:
   ApiKeyAuth:
+    description: Session cookie obtained from POST /login.
     in: header
-    name: Authorization
+    name: Cookie
     type: apiKey
 swagger: "2.0"

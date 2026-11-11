@@ -228,11 +228,12 @@ func TestGetStatusResponse(t *testing.T) {
 }
 
 func TestGetResultResponse(t *testing.T) {
+	text := "transcribed text"
 	response := types.GetResultResponse{
-		Result: "transcribed text",
+		Result: &text,
 	}
 
-	if response.Result == "" {
+	if response.Result == nil || *response.Result != text {
 		t.Errorf("Result should not be empty")
 	}
 }

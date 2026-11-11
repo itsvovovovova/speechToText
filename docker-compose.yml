@@ -3,6 +3,9 @@ services:
     image: rabbitmq:3.12-management
     env_file:
       - .env
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    hostname: rabbitmq
     ports:
       - "${RABBITMQ_PORT}:5672"
       - "${RABBITMQ_USER_PORT}:15672"
@@ -44,22 +47,37 @@ services:
       - .env
     environment:
       - DB_HOST=postgres
+      - DB_MIGRATION_PATH=file:///app/src/db/migration
       - REDIS_HOST=redis:6379
       - RABBITMQ_HOST=rabbitmq
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
     ports:
       - "${SERVER_PORT}:${SERVER_PORT}"
-    volumes:
-      - ./src/tests:/app/tests
     depends_on:
       redis:
-        condition: service_healthy
-      rabbitmq:
         condition: service_healthy
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:${SERVER_PORT}/health || exit 1"]
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:${SERVER_PORT}/ready || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build: .
+    command: ["/dockerproject", "worker"]
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_MIGRATION_PATH: file:///app/src/db/migration
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8081/ready || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -67,18 +85,17 @@ services:
   tests:
     build:
       context: .
-      dockerfile: Dockerfile
+      target: test
     env_file:
       - .env
     environment:
+      - STT_INTEGRATION=1
       - DB_HOST=postgres
+      - DB_MIGRATION_PATH=file:///app/src/db/migration
       - REDIS_HOST=redis:6379
       - RABBITMQ_HOST=rabbitmq
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-    command: ["go", "test", "./tests/go", "-v"]
     depends_on:
-      server:
-        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
@@ -91,7 +108,8 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/alerts.yml:/etc/prometheus/alerts.yml:ro
 
   grafana:
     image: grafana/grafana:latest
@@ -101,7 +119,10 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     volumes:
       - grafana-storage:/var/lib/grafana
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/etc/grafana/dashboards:ro
 
 volumes:
   grafana-storage:
+  rabbitmq_data:
   postgres_data:

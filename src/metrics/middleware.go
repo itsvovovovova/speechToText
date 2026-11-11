@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func (m *Metrics) Middleware(next http.Handler) http.Handler {
@@ -15,9 +17,13 @@ func (m *Metrics) Middleware(next http.Handler) http.Handler {
 		recorder := &statusRecorder{ResponseWriter: w, status: 200}
 		next.ServeHTTP(recorder, r)
 
+		pattern := chi.RouteContext(r.Context()).RoutePattern()
+		if pattern == "" {
+			pattern = "unknown"
+		}
 		duration := time.Since(start).Seconds()
-		m.HttpDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
-		m.HttpRequests.WithLabelValues(r.Method, r.URL.Path, strconv.Itoa(recorder.status)).Inc()
+		m.HttpDuration.WithLabelValues(r.Method, pattern).Observe(duration)
+		m.HttpRequests.WithLabelValues(r.Method, pattern, strconv.Itoa(recorder.status)).Inc()
 	})
 }
 
